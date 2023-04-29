@@ -1,0 +1,142 @@
+formatVersion: 1
+inputs:
+  osFlavor:
+    type: string
+    title: OS flavor
+    oneOf:
+      - title: Windows Server 2019
+        const: WinSrv2019
+      - title: Windows Server 2022
+        const: WinSrv2022
+    default: WinSrv2022
+  vCPU:
+    type: integer
+    title: Number of CPUs
+    enum:
+      - 2
+      - 4
+      - 8
+      - 16
+    default: 2
+  vRAM:
+    type: integer
+    title: Memory in MB
+    enum:
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+    default: 4096
+  additionalDisks:
+    type: array
+    title: Additional Disks
+    description: |
+      Additional Data Disks.<br>
+      Maximum allowed additional disks: 4
+    minItems: 0
+    maxItems: 4
+    items:
+      type: object
+      properties:
+        diskUnit:
+          type: integer
+          title: Disk Number
+          minimum: 1
+          maximum: 4
+        diskSize:
+          type: number
+          title: Size (GB)
+          minimum: 1
+          maximum: 500
+  rootPassword:
+    type: string
+    title: Administrator Password
+    description: |
+      Choose a password for the Administrator account.<br>
+      Must be 8 characters long at minimum.<br>
+      Allowed characters: a-z0-9A-Z@#$]+'
+    minLength: 8
+    maxLength: 64
+    pattern: '[a-z0-9A-Z@#$]+'
+    encrypted: true
+resources:
+  Cloud_VM_1:
+    type: Cloud.vSphere.Machine
+    properties:
+      ebs:
+        - VM_Compute_Post_Provision
+      image: ${input.osFlavor}
+      cpuCount: ${input.vCPU}
+      totalMemoryMB: ${input.vRAM}
+      folderName: vRA deployed VMs
+      storage:
+        constraints:
+          - tag: storage:bronze
+      networks:
+        - network: ${resource.Cloud_Net_1.id}
+          assignment: static
+      attachedDisks: ${map_to_object(resource.Disks[*].id, "source")}
+      constraints:
+        - tag: cz:vsphere
+      customizeGuestOs: false
+      remoteAccess:
+        authentication: usernamePassword
+        username: Administrator
+        password: ${input.rootPassword}
+      cloudConfig: |
+        Content-Type: multipart/mixed; boundary="==NewPart=="
+        MIME-Version: 1.0
+
+        --==NewPart==
+        Content-Type: text/cloud-config; charset="us-ascii"
+        MIME-Version: 1.0
+        Content-Transfer-Encoding: 7bit
+        Content-Disposition: attachment; filename="cloud-config"
+
+        set_hostname: ${self.resourceName}
+        write_files:
+          - content: |
+              cloudbase-init - ${self.resourceName}
+              IP Address - ${self.networks[0].address}
+              Netmask - ${resource.Cloud_Net_1.netmask}
+              Prefix Length - ${resource.Cloud_Net_1.prefixLength}
+              Gateway - ${resource.Cloud_Net_1.gateway}
+              DNS - ${replace(replace(to_string(resource.Cloud_Net_1.dns[0]),"]",")"),"[","(")},${replace(replace(to_string(resource.Cloud_Net_1.dns[1]),"]",")"),"[","(")}
+            path: C:\Windows\Temp\cloudinit-info.txt
+         
+        --==NewPart==
+        Content-Type: text/x-shellscript; charset="us-ascii"
+        MIME-Version: 1.0
+        Content-Transfer-Encoding: 7bit
+        Content-Disposition: attachment; filename="VM-init.ps1"
+
+        #ps1_sysnative
+        $adapter = Get-NetAdapter
+        $adapter | Remove-NetIpAddress -Confirm:$false
+        $adapter | Remove-NetRoute -Confirm:$false
+        $adapter | New-NetIpAddress -IpAddress ${self.networks[0].address} -PrefixLength ${resource.Cloud_Net_1.prefixLength} -DefaultGateway ${resource.Cloud_Net_1.gateway}
+        $adapter | Set-DnsClientServerAddress -ServerAddresses ${replace(replace(to_string(resource.Cloud_Net_1.dns[0]),"]",")"),"[","(")},${replace(replace(to_string(resource.Cloud_Net_1.dns[1]),"]",")"),"[","(")}
+        $arrNewDisks = Get-Disk | Where-Object{$_.OperationalStatus -eq "Offline" -and $_.PartitionStyle -eq "RAW"}
+        Foreach($objDisk In $arrNewDisks){
+          $thisDiskNo = $objDisk.Number
+          $objPartition = Get-Disk -Number $thisDiskNo | Initialize-Disk -PartitionStyle "GPT" -PassThru | New-Partition -AssignDriveLetter -UseMaximumSize
+          Format-Volume -DriveLetter $objPartition.DriveLetter -FileSystem "NTFS" -NewFileSystemLabel "Disk $thisDiskNo" -Confirm:$false
+        }
+        $drives = Get-WmiObject Win32_Volume -Filter "DriveType=5"
+        $drives | ForEach-Object { (New-Object -ComObject Shell.Application).Namespace(17).ParseName($_.Name).InvokeVerb("Eject") } -ErrorAction SilentlyContinue
+  Cloud_Net_1:
+    type: Cloud.Network
+    properties:
+      networkType: existing
+      constraints:
+        - tag: net:vsphere
+  Disks:
+    type: Cloud.vSphere.Disk
+    allocatePerInstance: true
+    properties:
+      capacityGb: ${input.additionalDisks[count.index].diskSize}
+      SCSIController: SCSI_Controller_0
+      unitNumber: ${input.additionalDisks[count.index].diskUnit}
+      count: ${length(input.additionalDisks)}

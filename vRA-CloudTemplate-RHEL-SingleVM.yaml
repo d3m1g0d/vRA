@@ -1,0 +1,158 @@
+formatVersion: 1
+inputs:
+  osFlavor:
+    type: string
+    title: OS flavor
+    oneOf:
+    #      - title: Red Hat Enterprise Linux 8
+  #        const: RHEL8
+      - title: Red Hat Enterprise Linux 9
+        const: RHEL9
+    default: RHEL9
+  vCPU:
+    type: integer
+    title: Number of CPUs
+    enum:
+      - 2
+      - 4
+      - 8
+      - 16
+    default: 2
+  vRAM:
+    type: integer
+    title: Memory in MB
+    enum:
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+    default: 2048
+  additionalDisks:
+    type: array
+    title: Additional Disks
+    description: |
+      Additional Data Disks.<br>
+      Maximum allowed additional disks: 4<br>
+      Disks will be formatted with the xfs filesystem<br>
+      and mounted at the specified mountpoint (e.g. /data).
+    minItems: 0
+    maxItems: 4
+    items:
+      type: object
+      properties:
+        diskUnit:
+          type: integer
+          title: Disk Number
+          minimum: 1
+          maximum: 4
+        mountPoint:
+          type: string
+          title: Mountpoint
+          minLength: 2
+          maxLength: 64
+          pattern: /[a-z0-9A-Z-_]+
+        diskSize:
+          type: number
+          title: Size (GB)
+          minimum: 1
+          maximum: 500
+  rootPassword:
+    type: string
+    title: Root Password
+    description: |
+      Choose a password for the root account.<br>
+      Must be 8 characters long at minimum.<br>
+      Allowed characters: a-z0-9A-Z@#$]+'
+    minLength: 8
+    maxLength: 64
+    pattern: '[a-z0-9A-Z@#$]+'
+    encrypted: true
+resources:
+  Cloud_VM_1:
+    type: Cloud.vSphere.Machine
+    properties:
+      ebs:
+        - VM_Compute_Post_Provision
+      image: ${input.osFlavor}
+      cpuCount: ${input.vCPU}
+      totalMemoryMB: ${input.vRAM}
+      folderName: vRA deployed VMs
+      storage:
+        constraints:
+          - tag: storage:bronze
+      networks:
+        - network: ${resource.Cloud_Net_1.id}
+          assignment: static
+      attachedDisks: ${map_to_object(resource.Disks[*].id, "source")}
+      constraints:
+        - tag: cz:vsphere
+      customizeGuestOs: false
+      cloudConfig: |
+        #cloud-config
+        ssh_pwauth: true
+        disable_root: false
+        chpasswd:
+          list: |
+            root:${input.rootPassword}
+            cloud-user:${input.rootPassword}
+          expire: false
+        bootcmd:
+          - fdisk -l /dev/sdb; [ $? -eq 0 ] && printf "o\nn\np\n1\n\n\nw\n" | fdisk /dev/sdb
+          - fdisk -l /dev/sdc; [ $? -eq 0 ] && printf "o\nn\np\n1\n\n\nw\n" | fdisk /dev/sdc
+          - fdisk -l /dev/sdd; [ $? -eq 0 ] && printf "o\nn\np\n1\n\n\nw\n" | fdisk /dev/sdd
+          - fdisk -l /dev/sde; [ $? -eq 0 ] && printf "o\nn\np\n1\n\n\nw\n" | fdisk /dev/sde
+        fs_setup:
+          - label: ${to_upper(replace(input.additionalDisks[0].mountPoint,"/",""))}
+            device: /dev/sdb
+            partition: 1
+            filesystem: xfs
+            overwrite: true
+          - label: ${to_upper(replace(input.additionalDisks[1].mountPoint,"/",""))}
+            device: /dev/sdc
+            partition: 1
+            filesystem: xfs
+            overwrite: true
+          - label: ${to_upper(replace(input.additionalDisks[2].mountPoint,"/",""))}
+            device: /dev/sdd
+            partition: 1
+            filesystem: xfs
+            overwrite: true
+          - label: ${to_upper(replace(input.additionalDisks[3].mountPoint,"/",""))}
+            device: /dev/sde
+            partition: 1
+            filesystem: xfs
+            overwrite: true
+        runcmd:
+          - mountpointb="${input.additionalDisks[0].mountPoint}"; [ -z "$(grep -w $mountpointb /etc/fstab)" ] && echo "/dev/sdb1   $mountpointb   xfs  defaults   0   2" >> /etc/fstab
+          - mountpointc="${input.additionalDisks[1].mountPoint}"; [ -z "$(grep -w $mountpointc /etc/fstab)" ] && echo "/dev/sdc1   $mountpointc   xfs  defaults   0   2" >> /etc/fstab
+          - mountpointd="${input.additionalDisks[2].mountPoint}"; [ -z "$(grep -w $mountpointd /etc/fstab)" ] && echo "/dev/sdd1   $mountpointd   xfs  defaults   0   2" >> /etc/fstab
+          - mountpointe="${input.additionalDisks[3].mountPoint}"; [ -z "$(grep -w $mountpointe /etc/fstab)" ] && echo "/dev/sde1   $mountpointe   xfs  defaults   0   2" >> /etc/fstab
+          - mountpointb="${input.additionalDisks[0].mountPoint}"; [ -d $mountpointb ] || mkdir -p $mountpointb
+          - mountpointc="${input.additionalDisks[1].mountPoint}"; [ -d $mountpointc ] || mkdir -p $mountpointc
+          - mountpointd="${input.additionalDisks[2].mountPoint}"; [ -d $mountpointd ] || mkdir -p $mountpointd
+          - mountpointe="${input.additionalDisks[3].mountPoint}"; [ -d $mountpointe ] || mkdir -p $mountpointe
+          - mount -a
+          - nmcli con add type ethernet con-name 'custom ens192' ifname ens192 ip4 ${self.networks[0].address}/${resource.Cloud_Net_1.prefixLength} gw4 ${resource.Cloud_Net_1.gateway}
+          - nmcli con mod 'custom ens192' ipv4.dns "${join(resource.Cloud_Net_1.dns,' ')}"
+          - nmcli con mod 'custom ens192' ipv4.dns-search "${join(resource.Cloud_Net_1.dnsSearchDomains,',')}"
+          - nmcli con down 'System ens192' ; nmcli con up 'custom ens192'
+          - nmcli con del 'System ens192'
+          - hostnamectl set-hostname --static ${self.resourceName}
+          - eject /dev/cdrom
+          - touch /etc/cloud/cloud-init.disabled
+  Cloud_Net_1:
+    type: Cloud.Network
+    properties:
+      networkType: existing
+      constraints:
+        - tag: net:vsphere
+  Disks:
+    type: Cloud.vSphere.Disk
+    allocatePerInstance: true
+    properties:
+      capacityGb: ${input.additionalDisks[count.index].diskSize}
+      SCSIController: SCSI_Controller_0
+      unitNumber: ${input.additionalDisks[count.index].diskUnit}
+      count: ${length(input.additionalDisks)}
