@@ -1,0 +1,79 @@
+formatVersion: 1
+inputs:
+  rootPassword:
+    type: string
+    title: Root Password
+    description: |
+      Choose a password for the root account.<br>
+      Must be 8 characters long at minimum.<br>
+      Allowed characters: a-z0-9A-Z@#$]+'
+    minLength: 8
+    maxLength: 64
+    pattern: '[a-z0-9A-Z@#$]+'
+    encrypted: true
+resources:
+  Cloud_Ansible_1:
+    type: Cloud.Ansible
+    properties:
+      host: ${resource.Cloud_VM_1.*}
+      osType: linux
+      account: iac.corp.local
+      username: root
+      password: ${input.rootPassword}
+      playbooks:
+        provision:
+          - /home/svc_aaiac/.ansible/ubuntu-install-webserver.yml
+  Cloud_VM_1:
+    type: Cloud.vSphere.Machine
+    properties:
+      image: Ubuntu22
+      cpuCount: 1
+      totalMemoryMB: 2048
+      folderName: vRA deployed VMs
+      storage:
+        constraints:
+          - tag: storage:bronze
+      networks:
+        - network: ${resource.Cloud_Net_1.id}
+          assignment: static
+      attachedDisks: []
+      constraints:
+        - tag: cz:vsphere
+      customizeGuestOs: false
+      cloudConfig: |
+        #cloud-config
+        write_files:
+          - path: /etc/netplan/99-installer-config.yaml
+            content: |
+              network:
+                version: 2
+                renderer: networkd
+                ethernets:
+                  ens160:
+                    addresses:
+                      - ${self.networks[0].address}/${resource.Cloud_Net_1.prefixLength}
+                    gateway4: ${resource.Cloud_Net_1.gateway}
+                    nameservers:
+                      search: ${resource.Cloud_Net_1.dnsSearchDomains}
+                      addresses: ${resource.Cloud_Net_1.dns}
+        ssh_pwauth: true
+        disable_root: false
+        chpasswd:
+          list: |
+            root:${input.rootPassword}
+            ubuntu:${input.rootPassword}
+          expire: false
+        runcmd:
+          - netplan apply
+          - hostnamectl set-hostname --static ${self.resourceName}
+          - sed -i '/PermitRootLogin/d' /etc/ssh/sshd_config
+          - echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+          - systemctl restart sshd.service
+          - eject /dev/cdrom
+          - touch /etc/cloud/cloud-init.disabled
+  Cloud_Net_1:
+    type: Cloud.Network
+    properties:
+      networkType: existing
+      constraints:
+        - tag: net:vsphere-mgmt
