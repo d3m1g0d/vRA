@@ -147,7 +147,7 @@ resources:
           - mountpointe="${input.additionalDisks[3].mountPoint}"; if [ $mountpointe != "null" ] && [ ! -d $mountpointe ] ; then  mkdir -p $mountpointe ; fi
           - mount -a
           - netplan apply
-          - hostnamectl set-hostname --pretty ${self.resourceName}
+          - hostnamectl set-hostname --static ${self.resourceName}
           - eject /dev/cdrom
           - touch /etc/cloud/cloud-init.disabled
   Cloud_Net_1:
