@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# VCF Automation 9.1 - All Apps Organization
+# Blueprint: Windows VM via vSphere VM Service (VM Operator)
+#
+# Deploys a Sysprep-customized Windows VM into an existing Supervisor
+# namespace of the project. Local Administrator password is passed via a
+# Kubernetes Secret created as part of the deployment.
+# ---------------------------------------------------------------------------
+formatVersion: 2
+version: 1.0.0
+inputs:
+  namespace:
+    type: string
+    title: Supervisor Namespace
+    description: Existing namespace in this project (e.g. my-ns-abc12)
+    default: default-namespace-h898q
+  vmName:
+    type: string
+    title: VM Name
+    description: Kubernetes object name (lowercase, digits, '-')
+    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+    maxLength: 40
+    default: win-vm
+  hostName:
+    type: string
+    title: Windows Computer Name
+    description: NetBIOS name, max. 15 characters
+    pattern: ^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+    maxLength: 15
+    default: win-vm
+  image:
+    type: string
+    title: Windows Image
+    description: VM image ID (kubectl get vmi / cvmi), e.g. vmi-0a1b2c3d4e5f67890
+    default: vmi-8736530ff249ee8d7
+  vmClass:
+    type: string
+    title: VM Class
+    default: best-effort-medium
+    enum:
+      - best-effort-small
+      - best-effort-medium
+      - best-effort-large
+      - best-effort-xlarge
+  storageClass:
+    type: string
+    title: Storage Class
+    description: Storage policy (K8s name) assigned to the namespace
+    default: k8s-nfs-default-sp
+  bootDiskGi:
+    type: integer
+    title: Boot Disk Size (GiB)
+    description: Must be >= the image disk size
+    default: 90
+    minimum: 90
+    maximum: 1024
+  adminPassword:
+    type: string
+    title: Local Administrator Password
+    encrypted: true
+    minLength: 12
+  timeZone:
+    type: integer
+    title: Time Zone
+    default: 110
+    oneOf:
+      - title: (UTC+01:00) Amsterdam, Berlin, Rome, Vienna
+        const: 110
+      - title: (UTC) Dublin, Lisbon, London
+        const: 85
+      - title: (UTC+02:00) Athens, Bucharest
+        const: 130
+      - title: (UTC-05:00) Eastern Time (US & Canada)
+        const: 35
+  workgroup:
+    type: string
+    title: Workgroup
+    default: WORKGROUP
+  orgName:
+    type: string
+    title: Organization
+    default: lab
+resources:
+  # --- Existing Supervisor namespace of the project -------------------------
+  namespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.namespace}
+      existing: true
+  # --- Secret holding the Administrator password for Sysprep ----------------
+  sysprepSecret:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}-sysprep
+        type: Opaque
+        stringData:
+          password: ${input.adminPassword}
+  # --- Windows VirtualMachine -----------------------------------------------
+  windowsVm:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - sysprepSecret
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachine
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}
+          labels:
+            app: ${input.vmName}-${env.shortDeploymentId}
+            os: windows
+        spec:
+          className: ${input.vmClass}
+          imageName: ${input.image}
+          storageClass: ${input.storageClass}
+          powerState: PoweredOn
+          advanced:
+            bootDiskCapacity: ${input.bootDiskGi + "Gi"}
+          network:
+            hostName: ${input.hostName}
+            # No interfaces listed -> VM is attached to the namespace's
+            # default network (VPC default subnet in All Apps orgs), DHCP/IPAM.
+          bootstrap:
+            sysprep:
+              sysprep:
+                userData:
+                  fullName: Administrator
+                  orgName: ${input.orgName}
+                guiUnattended:
+                  autoLogon: true
+                  autoLogonCount: 1
+                  timeZone: ${input.timeZone}
+                  password:
+                    name: ${input.vmName}-${env.shortDeploymentId}-sysprep
+                    key: password
+                identification:
+                  joinWorkgroup: ${input.workgroup}
+                guiRunOnce:
+                  commands:
+                    # Enable RDP + firewall rule on first (auto)logon
+                    - reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+                    - netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+      wait:
+        conditions:
+          - type: VirtualMachineCreated
+            status: 'True'
+          - type: GuestCustomization
+            status: 'True'
+  # --- Expose RDP via a LoadBalancer (NSX VPC) ---------------.
+  rdpService:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - windowsVm
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachineService
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}-rdp
+        spec:
+          type: LoadBalancer
+          selector:
+            app: ${input.vmName}-${env.shortDeploymentId}
+          ports:
+            - name: rdp
+              protocol: TCP
+              port: 3389
+              targetPort: 3389
