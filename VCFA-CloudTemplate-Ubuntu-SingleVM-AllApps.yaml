@@ -1,0 +1,180 @@
+# ---------------------------------------------------------------------------
+# VCF Automation 9.1 - All Apps Organization
+# Blueprint: Ubuntu 22.04 VM via vSphere VM Service + SSH (22/TCP) LoadBalancer
+#
+# - Existing Supervisor namespace of the project
+# - Secret with cloud-init user-data (user + SSH public key)
+# - VirtualMachine (vmoperator.vmware.com/v1alpha3) bootstrapped by cloud-init
+# - VirtualMachineService type LoadBalancer exposing port 22
+# ---------------------------------------------------------------------------
+formatVersion: 2
+version: 1.0.0
+inputs:
+  namespace:
+    type: string
+    title: Supervisor Namespace
+    description: Existing namespace in this project (e.g. my-ns-abc12)
+    default: default-namespace-h898q
+    enum:
+      - default-namespace-h898q
+  vmName:
+    type: string
+    title: VM Name
+    description: Lowercase letters, digits and '-' (also used as hostname)
+    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+    maxLength: 40
+    default: ubuntu-vm
+  image:
+    type: string
+    title: Ubuntu Image
+    description: Image from the content library
+    default: vmi-15044985240f1949d
+    oneOf:
+      - title: Ubuntu 22.04 LTS
+        const: vmi-15044985240f1949d
+  vmClass:
+    type: string
+    title: VM Class
+    default: best-effort-small
+    enum:
+      - best-effort-xsmall
+      - best-effort-small
+      - best-effort-medium
+      - best-effort-large
+  storageClass:
+    type: string
+    title: Storage Class
+    description: Storage policy (K8s name) assigned to the namespace
+    default: k8s-nfs-default-sp
+    enum:
+      - k8s-nfs-default-sp
+  bootDiskGi:
+    type: integer
+    title: Boot Disk Size (GiB)
+    description: Must be >= the image disk size
+    default: 10
+    minimum: 10
+    maximum: 1024
+  username:
+    type: string
+    title: Username
+    pattern: ^[a-z_][a-z0-9_-]*$
+    default: ubuntu
+  userPassword:
+    type: string
+    title: Local User Password
+    encrypted: true
+    minLength: 12
+  sshPublicKey:
+    type: string
+    title: SSH Public Key (optional)
+    description: e.g. ssh-ed25519 AAAA... user@host
+    pattern: ^$|^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)) .+
+    default: ''
+  sshSourceRanges:
+    type: array
+    title: Allowed SSH Source Ranges
+    description: CIDRs allowed to reach port 22 on the load balancer
+    items:
+      type: string
+    default:
+      - 0.0.0.0/0
+resources:
+  # --- Existing Supervisor namespace ----------------------------------------
+  namespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.namespace}
+      existing: true
+  # --- cloud-init user-data --------------------------------------------------
+  cloudInitSecret:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}-cloud-init
+        type: Opaque
+        stringData:
+          user-data: |
+            #cloud-config
+            hostname: ${input.vmName}
+            timezone: Europe/Vienna
+            ssh_pwauth: true
+            users:
+              - name: ${input.username}
+                shell: /bin/bash
+                sudo: ALL=(ALL) NOPASSWD:ALL
+                groups: [sudo]
+                lock_passwd: false
+                plain_text_passwd: '${input.userPassword}'
+                ssh_authorized_keys:
+                  - '${input.sshPublicKey}'
+            chpasswd:
+              expire: false
+            package_update: true
+            packages:
+              - open-vm-tools
+            runcmd:
+              # Ubuntu cloud images ship a drop-in that disables password auth
+              - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config.d/*.conf
+              - systemctl enable ssh
+              - systemctl restart ssh
+  # --- Ubuntu VirtualMachine -------------------------------------------------
+  ubuntuVm:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - cloudInitSecret
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachine
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}
+          labels:
+            app: ${input.vmName}-${env.shortDeploymentId}
+            os: ubuntu
+        spec:
+          className: ${input.vmClass}
+          imageName: ${input.image}
+          storageClass: ${input.storageClass}
+          powerState: PoweredOn
+          advanced:
+            bootDiskCapacity: ${input.bootDiskGi + "Gi"}
+          network:
+            hostName: ${input.vmName}
+            # No interfaces listed -> namespace default network (VPC subnet)
+          bootstrap:
+            cloudInit:
+              rawCloudConfig:
+                name: ${input.vmName}-${env.shortDeploymentId}-cloud-init
+                key: user-data
+      wait:
+        conditions:
+          - type: VirtualMachineCreated
+            status: 'True'
+  # --- Expose RDP via a LoadBalancer (NSX VPC) -------------------------------
+  sshService:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - ubuntuVm
+    properties:
+      context: ${resource.namespace.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachineService
+        metadata:
+          name: ${input.vmName}-${env.shortDeploymentId}-ssh
+        spec:
+          type: LoadBalancer
+          selector:
+            app: ${input.vmName}-${env.shortDeploymentId}
+          ports:
+            - name: ssh
+              protocol: TCP
+              port: 22
+              targetPort: 22
+          loadBalancerSourceRanges: ${input.sshSourceRanges}
