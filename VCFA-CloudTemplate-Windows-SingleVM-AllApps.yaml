@@ -14,6 +14,8 @@ inputs:
     title: Supervisor Namespace
     description: Existing namespace in this project (e.g. my-ns-abc12)
     default: default-namespace-h898q
+    enum:
+      - default-namespace-h898q
   vmName:
     type: string
     title: VM Name
@@ -33,6 +35,9 @@ inputs:
     title: Windows Image
     description: VM image ID (kubectl get vmi / cvmi), e.g. vmi-0a1b2c3d4e5f67890
     default: vmi-8736530ff249ee8d7
+    oneOf:
+      - title: Windows Server 2022 Datacenter Edition DEXP
+        const: vmi-8736530ff249ee8d7
   vmClass:
     type: string
     title: VM Class
@@ -47,6 +52,8 @@ inputs:
     title: Storage Class
     description: Storage policy (K8s name) assigned to the namespace
     default: k8s-nfs-default-sp
+    enum:
+      - k8s-nfs-default-sp
   bootDiskGi:
     type: integer
     title: Boot Disk Size (GiB)
